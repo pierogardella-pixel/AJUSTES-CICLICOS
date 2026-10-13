@@ -132,6 +132,7 @@
 .shared-info{font-size:12px;color:#546781;display:flex;align-items:center;gap:9px;line-height:1.4}.shared-led{width:8px;height:8px;background:#f5a623;border-radius:50%;flex:none}.shared-bar.ok .shared-led{background:#2ea45b}.shared-bar.error .shared-led{background:#e45b3a}.shared-controls{display:flex;gap:7px;flex-wrap:wrap}.shared-controls .btn{min-height:32px;padding:6px 10px;font-size:11px}
 @media(max-width:650px){.shared-bar{align-items:flex-start}.shared-controls{width:100%}.shared-controls .btn{flex:1}}
 </style>
+<script src="firebase-config.js"></script>
 </head>
 <body>
 <div class="app">
@@ -153,7 +154,7 @@
       <div class="top-right"><div class="searchbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg><input id="globalSearch" placeholder="Buscar producto o documento..." aria-label="Buscar" autocomplete="off"></div><button class="icon-btn" id="notifications" title="Ver alertas" aria-label="Ver alertas"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span class="notification-dot"></span></button><div class="profile"><div class="avatar">3A</div><div><b>Inventarios</b><span>CEDI Punta Hermosa</span></div></div></div>
     </header>
     <div class="toolbar"><div class="toolbar-left"><span class="pill">Centro: <b>CEDI Punta Hermosa</b></span><span class="pill" id="periodPill">Periodo: —</span></div><div class="toolbar-right"><button class="btn btn-light" id="openImport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V3M7 8l5-5 5 5M4 14v6h16v-6"/></svg> Importar CSV / Excel</button><button class="btn btn-primary" id="openAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Nuevo ajuste</button></div></div>
-<div id="sharedBar" class="shared-bar" aria-live="polite"><div class="shared-info"><span class="shared-led"></span><span id="sharedStatus">Consultando última actualización compartida…</span></div><div class="shared-controls"><button class="btn btn-muted" id="githubRefresh" type="button">↻ Actualizar datos</button><button class="btn btn-light" id="githubConnect" type="button">Conectar GitHub</button><button class="btn btn-primary" id="githubPublish" type="button">Publicar datos</button></div></div>
+<div id="sharedBar" class="shared-bar" aria-live="polite"><div class="shared-info"><span class="shared-led"></span><span id="sharedStatus">Preparando sincronización compartida…</span></div><div class="shared-controls"><button class="btn btn-muted" id="firebaseRefresh" type="button">↻ Actualizar datos</button><button class="btn btn-light" id="firebaseConnect" type="button">Iniciar sesión Google</button><button class="btn btn-primary" id="firebasePublish" type="button">Guardar para todos</button></div></div>
     <div id="viewRoot"></div>
     
   </main>
@@ -457,100 +458,154 @@ const importAJUOriginal=previewImport;
 previewImport=async function(){const file=$('#importFile')?.files?.[0];if(file&&/\.xlsx$/i.test(file.name)){try{const rows=await cycleReadWorkbook(file);cycleRows=rows;cySession='';cyAisle='';cyStatus='FINALIZADOS';cyclePage=0;search='';$('#globalSearch').value='';saveCycle();view='ciclicos';closeModal();renderCurrent();toast('Formato detectado: inventario cíclico · '+fmt(rows.length)+' líneas.');return}catch(e){/* No es un consolidado cíclico; seguir con el importador AJU. */}}return importAJUOriginal()}
 window.addEventListener('submit',e=>{if(e.target.id==='cycleEditForm'){e.preventDefault();cycleEditSave()}});
 
-/* ===== GITHUB PAGES: datos compartidos =====
-  Lectura anónima; publicación únicamente por quien cuente con un token GitHub
-  fine-grained limitado a este repositorio y Contents Read/Write.
-  El token permanece solo en memoria durante esta visita. */
-const SHARED_REPO='pierogardella-pixel/AJUSTES-CICLICOS';
-const SHARED_API='https://api.github.com/repos/'+SHARED_REPO+'/contents/data/latest.b64';
-let sharedToken='', sharedDirty=false, sharedPublishing=false, sharedLastAt='',sharedLastCheck=0,sharedLastSha='',sharedAutoTimer;
+/* Sincronización Firebase · Firestore
+ * Lectura pública, escritura autorizada por reglas Firestore y Google Authentication.
+ * No se guardan tokens de acceso de GitHub en el navegador. */
+let sharedDirty=false,sharedPublishing=false,sharedLastAt='',sharedLastRevision=null,sharedAutoTimer,sharedLastCheck=0,sharedLoading=false;
+let sharedHydrated=false;
+function firebaseAdapter(){return window.ajeFirebaseAdapter||null}
 function sharedStatus(message,kind=''){
-  const bar=document.getElementById('sharedBar'),t=document.getElementById('sharedStatus');
-  if(!bar||!t)return;
-  bar.classList.remove('ok','error');if(kind)bar.classList.add(kind);
-  t.textContent=message;
-  document.getElementById('githubConnect').textContent=sharedToken?'GitHub conectado ✓':'Conectar GitHub';
+ const bar=document.getElementById('sharedBar'), node=document.getElementById('sharedStatus');
+ if(!bar||!node)return;
+ bar.classList.remove('ok','error');if(kind)bar.classList.add(kind);
+ node.textContent=message;
+ const auth=firebaseAdapter()?.user;
+ const login=document.getElementById('firebaseConnect');
+ if(login)login.textContent=auth?'Salir: '+(auth.email||'Editor'):'Iniciar sesión Google';
 }
 function sharedChanged(){
-  sharedDirty=true;
-  sharedStatus(sharedToken?'Cambios locales pendientes de publicar…':'Cambios guardados SOLO en este navegador. Conecta GitHub para compartirlos.','error');
-  if(sharedToken){clearTimeout(sharedAutoTimer);sharedAutoTimer=setTimeout(()=>sharedPublish(),2200)}
+ sharedDirty=true;
+ if(firebaseAdapter()?.user){
+   sharedStatus('Guardando cambios compartidos…');clearTimeout(sharedAutoTimer);
+   sharedAutoTimer=setTimeout(()=>sharedPublish(true),1900);
+ }else{sharedStatus('Cambios locales pendientes. Inicia sesión para guardarlos para todos.','error')}
 }
-function sharedAuthModal(){
-  modal('Conectar editor GitHub',`<form id="githubAuthForm">
-    <p style="font-size:13px;color:#526581;line-height:1.65">La web es de lectura pública. Para que un Excel importado o un cambio manual aparezca en <b>todos los equipos</b>, debes autorizar la escritura con un <b>Fine-grained personal access token</b> de GitHub limitado al repositorio <b>${SHARED_REPO}</b>, con permiso <b>Contents: Read and write</b>.</p>
-    <div class="field"><label for="ghToken">Token de acceso (no se guarda en la web ni en el repositorio)</label><input id="ghToken" type="password" autocomplete="off" required placeholder="github_pat_…" /></div>
-    <p class="caption">Crea el token en GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. NO pegues la clave en el código HTML ni la compartas con otros.</p>
-    <div class="dialog-foot"><button type="button" class="btn btn-muted" data-close="1">Cancelar</button><button type="submit" class="btn btn-primary">Autorizar esta sesión</button></div>
-  </form>`)
+function firebaseMsg(err){
+ const message=String(err?.message||err||'Error desconocido');
+ return message.length>170?message.slice(0,170)+'…':message;
 }
-async function sharedFetchAuthSha(){
-  const headers={Accept:'application/vnd.github+json',Authorization:'Bearer '+sharedToken,'X-GitHub-Api-Version':'2022-11-28'};
-  const r=await fetch(SHARED_API+'?t='+Date.now(),{headers,cache:'no-store'});
-  if(r.status===404)return null;
-  if(!r.ok)throw Error('GitHub no permite comprobar la versión: '+r.status);
-  return (await r.json()).sha;
+async function sharedLogin(){
+ const adapter=firebaseAdapter();
+ if(!adapter){toast('Firebase aún no está conectado al dashboard.',true);return}
+ try{
+  if(adapter.user){await adapter.logout();sharedStatus('Sesión cerrada. Consulta pública disponible.');return}
+  await adapter.login();
+  sharedStatus('Sesión Google iniciada. Las escrituras requieren autorización.','ok');
+  if(sharedDirty)sharedPublish(true);
+ }catch(err){sharedStatus('Error al iniciar sesión: '+firebaseMsg(err),'error');toast('No se pudo iniciar sesión Google.',true)}
 }
-async function sharedPublish(){
-  if(!sharedToken){sharedAuthModal();return}
-  if(sharedPublishing)return;
-  clearTimeout(sharedAutoTimer);
-  sharedPublishing=true;sharedStatus('Publicando nueva actualización para todos…');
-  try{
-    const payload={version:1,publishedAt:new Date().toISOString(),cycleRows:cycleRows.map(r=>r.map((v,i)=>i===13?null:v)),masterRows,records};
-    const zip=new JSZip();zip.file('snapshot.json',JSON.stringify(payload));
-    const encoded=await zip.generateAsync({type:'base64',compression:'DEFLATE',compressionOptions:{level:7}});
-    // The repository stores compressed data, not credentials.
-    const sha=await sharedFetchAuthSha();
-    const body={message:'Actualización de inventarios desde dashboard AJE',content:btoa(encoded),branch:'main'};
-    if(sha)body.sha=sha;
-    const r=await fetch(SHARED_API,{method:'PUT',headers:{Accept:'application/vnd.github+json',Authorization:'Bearer '+sharedToken,'X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!r.ok){let result={};try{result=await r.json()}catch(_){};throw Error(r.status+' '+String(result.message||'No se publicó').slice(0,180))}
-    const published=await r.json();sharedLastSha=published.content?.sha||'';sharedLastAt=payload.publishedAt;
-    sharedDirty=false;sharedStatus('Publicado para todos · '+new Date(sharedLastAt).toLocaleString('es-PE'), 'ok');toast('Datos publicados en GitHub. Visibles para todos al actualizar la página.');
-  }catch(err){sharedStatus('NO publicado: '+err.message,'error');toast('Error al publicar. '+err.message,true)}
-  finally{sharedPublishing=false}
+async function sharedPublish(auto=false){
+ const adapter=firebaseAdapter();
+ if(!adapter){sharedStatus('Firebase no está configurado. No se han publicado cambios.','error');if(!auto)toast('Conecta primero el proyecto Firebase.',true);return}
+ if(!adapter.user){sharedStatus('Inicia sesión Google para publicar cambios.','error');if(!auto)toast('Inicia sesión para publicar los datos.',true);return}
+ if(sharedPublishing)return;
+ if(!sharedHydrated){sharedStatus('Primero espera la carga de la última versión compartida.','error');if(!auto)toast('Actualiza datos antes de publicar.',true);return}
+ clearTimeout(sharedAutoTimer);sharedPublishing=true;
+ sharedStatus('Publicando la última actualización en Firebase…');
+ try{
+  const payload={version:1,publishedAt:new Date().toISOString(),cycleRows:cycleRows.map(r=>r.map((v,i)=>i===13?null:v)),masterRows,records};
+  const out=await adapter.publish(payload,sharedLastRevision);
+  sharedLastRevision=out.revision;sharedLastAt=payload.publishedAt;sharedDirty=false;
+  sharedStatus('Datos guardados para todos · '+new Date(sharedLastAt).toLocaleString('es-PE'),'ok');
+  if(!auto)toast('Datos publicados correctamente para todos los visitantes.');
+ }catch(err){
+  sharedStatus('No se publicó: '+firebaseMsg(err),'error');
+  toast('No se publicó el reporte: '+firebaseMsg(err),true);
+ }finally{sharedPublishing=false}
 }
 async function sharedRefresh(silent=false){
-  if(sharedDirty){if(!silent)toast('Hay cambios locales sin publicar. Publícalos antes de actualizar.',true);return}
-  if(!silent)sharedStatus('Consultando último reporte en GitHub…');
-  try{
-    const r=await fetch(SHARED_API+'?t='+Date.now(),{headers:{Accept:'application/vnd.github+json'},cache:'no-store'});
-    if(r.status===404){sharedStatus('Aún no hay datos compartidos publicados: mostrando reporte inicial.','error');return}
-    if(!r.ok)throw Error('GitHub '+r.status+' (puede existir un límite temporal de lectura)');
-    const info=await r.json();if(info.sha&&info.sha===sharedLastSha){if(!silent)sharedStatus('Última actualización · '+new Date(sharedLastAt).toLocaleString('es-PE'),'ok');return}
-    if(info.encoding!=='base64'||!info.content)throw Error('Archivo compartido no disponible');
-    const encoded=atob(info.content.replace(/\s/g,''));
-    const archive=await JSZip.loadAsync(encoded,{base64:true});
-    const snap=JSON.parse(await archive.file('snapshot.json').async('text'));
-    if(!snap||snap.version!==1||!Array.isArray(snap.cycleRows)||!Array.isArray(snap.masterRows)||!Array.isArray(snap.records))throw Error('Formato de respaldo no reconocido');
-    // Replace local state only after successful complete read.
-    cycleRows=snap.cycleRows; masterRows=snap.masterRows;records=snap.records;
-    masterMap=new Map(masterRows.map(r=>[normSku(r[0]),r]));
-    try{localStorage.setItem(CYCLE_DATA_KEY,JSON.stringify(cycleRows));localStorage.setItem(MASTER_STORAGE_KEY,JSON.stringify(masterRows));localStorage.setItem(STORAGE_KEY,JSON.stringify(records))}catch(_){/* local quota may be exceeded; shared data remains available */}
-    sharedLastAt=snap.publishedAt||'';sharedLastSha=info.sha;sharedLastCheck=Date.now();
-    renderCurrent();sharedStatus('Última actualización compartida · '+(sharedLastAt?new Date(sharedLastAt).toLocaleString('es-PE'):'disponible'),'ok');
-    if(!silent)toast('Datos actualizados desde GitHub.');
-  }catch(err){sharedStatus('No se pudo consultar GitHub: '+err.message,'error');if(!silent)toast('Error al actualizar. '+err.message,true)}
+ const adapter=firebaseAdapter();
+ if(!adapter){sharedStatus('Firebase pendiente de conectar. Los cambios son locales.','error');return}
+ if(sharedDirty){if(!silent)toast('Hay cambios locales sin publicar. Guárdalos primero.',true);return}
+ if(sharedLoading)return;
+ sharedLoading=true;
+ if(!silent)sharedStatus('Consultando última actualización en Firebase…');
+ try{
+   const data=await adapter.load();
+   if(!data){sharedHydrated=true;sharedLastCheck=Date.now();sharedStatus('Sin publicación en Firebase: mostrando datos iniciales.','error');return}
+   if(data.revision===sharedLastRevision){sharedHydrated=true;sharedLastCheck=Date.now();if(!silent)sharedStatus('Última actualización · '+new Date(sharedLastAt).toLocaleString('es-PE'),'ok');return}
+   const snap=data.payload;
+   if(!snap||snap.version!==1||!Array.isArray(snap.cycleRows)||!Array.isArray(snap.masterRows)||!Array.isArray(snap.records))throw Error('Archivo de inventario no reconocido');
+   cycleRows=snap.cycleRows;masterRows=snap.masterRows;records=snap.records;
+   masterMap=new Map(masterRows.map(r=>[normSku(r[0]),r]));
+   try{localStorage.setItem(CYCLE_DATA_KEY,JSON.stringify(cycleRows));localStorage.setItem(MASTER_STORAGE_KEY,JSON.stringify(masterRows));localStorage.setItem(STORAGE_KEY,JSON.stringify(records))}catch(_){/* contenido remoto en memoria */}
+   sharedLastRevision=data.revision;sharedLastAt=snap.publishedAt||data.publishedAt||'';
+   sharedLastCheck=Date.now();sharedHydrated=true;
+   renderCurrent();sharedStatus('Datos compartidos · '+(sharedLastAt?new Date(sharedLastAt).toLocaleString('es-PE'):'actualizados'),'ok');
+   if(!silent)toast('Últimos datos cargados desde Firebase.');
+ }catch(err){sharedStatus('No se pudo leer Firebase: '+firebaseMsg(err),'error');if(!silent)toast('No se pudo actualizar: '+firebaseMsg(err),true)}
+ finally{sharedLoading=false}
 }
 document.addEventListener('click',e=>{
  const b=e.target.closest('button');if(!b)return;
- if(b.id==='githubConnect'){sharedAuthModal()}
- if(b.id==='githubPublish'){sharedPublish()}
- if(b.id==='githubRefresh'){sharedRefresh()}
+ if(b.id==='firebaseConnect')sharedLogin();
+ if(b.id==='firebasePublish')sharedPublish();
+ if(b.id==='firebaseRefresh')sharedRefresh();
 });
-document.addEventListener('submit',e=>{
- if(e.target.id!=='githubAuthForm')return;
- e.preventDefault();sharedToken=document.getElementById('ghToken').value.trim();closeModal();
- sharedStatus(sharedDirty?'GitHub autorizado. Publica tus cambios pendientes.':'GitHub autorizado. Puedes importar y publicar datos.','ok');
- if(sharedDirty)sharedPublish();
+window.addEventListener('ajeFirebaseReady',e=>{
+  if(e.detail?.error){sharedStatus('Firebase: '+firebaseMsg(e.detail.error),'error');return}
+  const a=firebaseAdapter();if(!a)return;
+  a.subscribeUser(user=>{
+    const login=document.getElementById('firebaseConnect');if(login)login.textContent=user?'Salir: '+(user.email||'Editor'):'Iniciar sesión Google';
+    if(user&&sharedDirty)sharedPublish(true);
+  });
+  a.listen(()=>{if(!sharedDirty&&!sharedPublishing)sharedRefresh(true)},err=>{sharedStatus('Error de lectura: '+firebaseMsg(err),'error')});
+  sharedRefresh(true);
 });
-window.addEventListener('focus',()=>{if(Date.now()-sharedLastCheck>120000)sharedRefresh(true)});
-setInterval(()=>{if(!sharedDirty&&!sharedPublishing)sharedRefresh(true)},5*60*1000);
-// Never publish automatically using an embedded shared secret.
-
+window.addEventListener('focus',()=>{if(Date.now()-sharedLastCheck>60000)sharedRefresh(true)});
 renderCurrent();
-sharedRefresh(true);
+sharedStatus('Firebase aún sin configurar. Pendiente de vincular proyecto.','error');
+
+</script>
+<script type="module">
+import {initializeApp} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
+import {getAuth,GoogleAuthProvider,signInWithPopup,signOut,onAuthStateChanged} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import {getFirestore,doc,collection,getDocFromServer,getDocs,setDoc,runTransaction,onSnapshot} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+const ready=(error)=>window.dispatchEvent(new CustomEvent('ajeFirebaseReady',{detail:{error}}));
+try{
+  const cfg=window.AJE_FIREBASE_CONFIG;
+  if(!cfg||!cfg.apiKey||!cfg.projectId||!cfg.appId){ready('Faltan los datos públicos del proyecto Firebase.');}
+  else{
+    const app=initializeApp(cfg),db=getFirestore(app),auth=getAuth(app),provider=new GoogleAuthProvider();
+    const pointer=doc(db,'aje_public','current');
+    const read=async()=>{
+      const current=await getDocFromServer(pointer);
+      if(!current.exists())return null;
+      const info=current.data(),rev=String(info.revision||'');
+      if(!/^[A-Za-z0-9_-]{12,80}$/.test(rev))throw Error('Identificador de versión no válido');
+      const parts=await getDocs(collection(db,'aje_snapshots',rev,'parts'));
+      const docs=parts.docs.map(d=>d.data()).sort((a,b)=>a.index-b.index);
+      if(docs.length!==info.partCount||docs.some((p,i)=>p.index!==i||typeof p.content!=='string'))throw Error('El respaldo compartido está incompleto');
+      const b64=docs.map(x=>x.content).join('');
+      if(b64.length>25000000)throw Error('Archivo compartido excede el tamaño permitido');
+      const zip=await JSZip.loadAsync(b64,{base64:true});
+      const body=zip.file('snapshot.json');if(!body)throw Error('No se encontró el respaldo JSON');
+      const payload=JSON.parse(await body.async('text'));
+      return {revision:rev,publishedAt:info.publishedAt,payload};
+    };
+    const publish=async(payload,expected)=>{
+      if(!auth.currentUser)throw Error('Inicia sesión con Google para publicar');
+      const zip=new JSZip();zip.file('snapshot.json',JSON.stringify(payload));
+      const encoded=await zip.generateAsync({type:'base64',compression:'DEFLATE',compressionOptions:{level:7}});
+      if(encoded.length>15000000)throw Error('El archivo de datos es demasiado grande para este método.');
+      const parts=encoded.match(/[\s\S]{1,180000}/g)||[];
+      const revision='rev_'+crypto.randomUUID().replace(/-/g,'');
+      for(let i=0;i<parts.length;i++)await setDoc(doc(db,'aje_snapshots',revision,'parts',String(i).padStart(5,'0')),{index:i,content:parts[i]});
+      await runTransaction(db,async tx=>{
+        const snap=await tx.get(pointer);const existing=snap.exists()?snap.data().revision:null;
+        if(existing!==expected)throw Error('Otro usuario publicó información nueva. Actualiza antes de guardar para evitar sobrescribirla.');
+        tx.set(pointer,{revision,partCount:parts.length,publishedAt:payload.publishedAt,version:1});
+      });
+      return {revision};
+    };
+    const adapter={user:null,load:read,publish,
+      login:()=>signInWithPopup(auth,provider),logout:()=>signOut(auth),
+      subscribeUser:cb=>onAuthStateChanged(auth,user=>{adapter.user=user;cb(user)}),
+      listen:(onChange,onError)=>onSnapshot(pointer,onChange,onError)};
+    window.ajeFirebaseAdapter=adapter;
+    ready();
+  }
+}catch(error){ready(error?.message||String(error))}
 </script>
 </body>
 </html>
