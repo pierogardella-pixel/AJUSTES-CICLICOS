@@ -4,7 +4,7 @@ service cloud.firestore {
     function isEditor() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.email == 'REEMPLAZAR_CORREO_EDITOR_AUTORIZADO';
+        && request.auth.token.email == 'piero.gardella@ajiles.pe';
     }
     match /aje_public/{docId} {
       allow read: if docId == 'current';
