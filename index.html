@@ -205,7 +205,7 @@ const isoDisplay=s=>s?`${s.slice(8,10)}/${s.slice(5,7)}/${s.slice(0,4)}`:'—';
 const shortDate=s=>s?new Date(s+'T12:00:00').toLocaleDateString('es-PE',{day:'2-digit',month:'short'}).replace('.',''):'';
 function uniqueId(){return (globalThis.crypto?.randomUUID?.()||('m'+Date.now().toString(36)+Math.random().toString(36).slice(2,9)))}
 function loadRecords(){try{const saved=JSON.parse(localStorage.getItem(STORAGE_KEY));if(Array.isArray(saved))return saved.map(r=>({...r,qty:Number(r.qty)||0,factor:Number(r.factor)||1})).filter(r=>r.qty>0&&r.date&&r.product)}catch(e){}return structuredClone(DEMO)}
-function save(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(records));sharedChanged();return true}catch(e){toast('No se pudo guardar. Exporta un respaldo JSON para conservar tus datos.',true);return false}}
+function save(){sharedChanged();try{localStorage.setItem(STORAGE_KEY,JSON.stringify(records));return true}catch(e){toast('No se pudo guardar. Exporta un respaldo JSON para conservar tus datos.',true);return false}}
 function toast(msg,warn=false){const t=$('#toast');t.textContent=msg;t.className='toast show'+(warn?' warn':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>{t.className='toast'},4200)}
 function getProductColor(name){let i=PRODUCTS.findIndex(p=>p.name===name);if(i<0)i=Array.from(new Set(records.map(r=>r.product))).sort().indexOf(name)+3;return COLORS[i%COLORS.length]}
 function getProductFactor(name){const p=PRODUCTS.find(p=>p.name===name);return p?.factor||Number(records.find(r=>r.product===name)?.factor)||1}
@@ -403,7 +403,7 @@ let masterQuery='',masterBrand='',masterType='',masterPage=0;
 const masterPageSize=25;
 function rebuildMaster(){masterMap=new Map(masterRows.map(r=>[normSku(r[0]),r]))}
 function masterName(sku){return masterMap.get(normSku(sku))?.[4]||''}
-function masterSave(){try{localStorage.setItem(MASTER_STORAGE_KEY,JSON.stringify(masterRows));sharedChanged();return true}catch(e){toast('No se guardó el catálogo. Descarga una copia CSV.',true);return false}}
+function masterSave(){sharedChanged();try{localStorage.setItem(MASTER_STORAGE_KEY,JSON.stringify(masterRows));return true}catch(e){toast('No se guardó el catálogo. Descarga una copia CSV.',true);return false}}
 function masterCoverage(){const missing=cycleRows.filter(r=>normSku(r[6])&&!String(r[7]??'').trim());const linked=missing.filter(r=>masterName(r[6]));return{missing:missing.length,linked:linked.length,unmatched:missing.length-linked.length}}
 function masterFiltered(){const q=masterQuery.trim().toLowerCase();return masterRows.filter(r=>(!masterType||r[1]===masterType)&&(!masterBrand||r[2]===masterBrand)&&(!q||r.some(c=>String(c).toLowerCase().includes(q))))}
 function masterGridHtml(){const rows=masterFiltered(),lastPage=Math.max(0,Math.ceil(rows.length/masterPageSize)-1);masterPage=Math.min(masterPage,lastPage);const start=masterPage*masterPageSize,vis=rows.slice(start,start+masterPageSize);return `<div class="table-scroll"><table class="master-table"><thead><tr><th>SKU</th><th>Nombre del producto</th><th>Tipo de marca</th><th>Marca</th><th>Procedencia</th><th>Editar</th></tr></thead><tbody>${vis.map(r=>`<tr><td>${esc(r[0])}</td><td class="name">${esc(r[4])}</td><td><span class="master-tag ${r[1]==='TERCERA'?'third':''}">${esc(r[1]||'—')}</span></td><td>${esc(r[2]||'—')}</td><td>${esc(r[3]||'—')}</td><td><button class="btn mini-btn btn-muted" type="button" data-master-edit="${esc(r[0])}">Editar</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty">No se encontraron SKU con esos filtros.</td></tr>'}</tbody></table></div><div class="master-pager"><span>Mostrando ${rows.length?start+1:0}–${Math.min(rows.length,start+masterPageSize)} de ${fmt(rows.length)} SKU</span><div class="actions"><button class="btn btn-muted mini-btn" data-master-page="prev" ${masterPage===0?'disabled':''}>← Anterior</button><button class="btn btn-muted mini-btn" data-master-page="next" ${masterPage>=lastPage?'disabled':''}>Siguiente →</button></div></div>`}
@@ -419,7 +419,7 @@ window.addEventListener('change',e=>{if(e.target.id==='masterType'){masterType=e
 window.addEventListener('submit',e=>{if(e.target.id==='masterEditForm'){e.preventDefault();masterEditSave()}});
 
 let cycleRows=readCycle(), cySession='',cyStatus='FINALIZADOS',cyAisle='',cyclePage=0,cyclePageSize=35,cycleSource='Resumen consolidado · 35 sesiones';
-function saveCycle(){try{localStorage.setItem(CYCLE_DATA_KEY,JSON.stringify(cycleRows));sharedChanged();return true}catch(e){toast('No se pudo guardar el inventario en este navegador. Descarga un respaldo.',true);return false}}
+function saveCycle(){sharedChanged();try{localStorage.setItem(CYCLE_DATA_KEY,JSON.stringify(cycleRows));return true}catch(e){toast('No se pudo guardar el inventario en este navegador. Descarga un respaldo.',true);return false}}
 const cs=(row,idx)=>{const existing=String(row[idx]??'');return idx===7&&!existing.trim()&&normSku(row[6])?masterName(row[6]):existing};
 const cn=(row,idx)=>Number(row[idx])||0;
 const cycleFinal=r=>['COMPLETADO','VERIFICADO'].includes(cs(r,12).toUpperCase());
